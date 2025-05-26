@@ -1,0 +1,220 @@
+Guia de Instalação Windows Server 2022 - Controlador de Domínio
+Requisitos do Sistema
+Mínimos
+
+Processador: 1,4 GHz 64 bits
+RAM: 2 GB (4 GB recomendado)
+Armazenamento: 32 GB (60 GB recomendado)
+Rede: Adaptador Gigabit Ethernet
+
+Produção
+
+Processador: Intel Xeon ou AMD EPYC (4+ núcleos)
+RAM: 16 GB (32 GB para ambientes grandes)
+Armazenamento: 500 GB SSD (RAID 1 recomendado)
+Rede: 2x Adaptadores Gigabit (redundância)
+
+Preparação
+Download
+
+Acesse o Centro de Avaliação da Microsoft
+Baixe Windows Server 2022 Standard
+Verifique hash SHA-256
+
+Configuração VM
+Nome: DC01-WinServer2022
+
+RAM: 8 GB
+CPU: 4 vCores
+Disco: 100 GB
+Rede: Rede VM
+
+Instalação
+Configurações Iniciais
+
+Idioma: Português (Brasil)
+Teclado: Português (Brasil ABNT2)
+Edição: Windows Server 2022 Standard (Experiência na Área de Trabalho)
+Tipo: Instalação personalizada
+Senha Admin: AdminP@ssw0rd2024!
+
+Configuração Pós-Instalação
+1. Configuração de Rede
+powershell# Renomear interface
+Rename-NetAdapter -Name "Ethernet" -NewName "LAN"
+
+# IP estático
+New-NetIPAddress -IPAddress 192.168.10.10 -PrefixLength 24 -InterfaceIndex (Get-NetAdapter -Name "LAN").ifIndex -DefaultGateway 192.168.10.1
+
+# DNS temporário
+Set-DnsClientServerAddress -InterfaceIndex (Get-NetAdapter -Name "LAN").ifIndex -ServerAddresses 8.8.8.8,8.8.4.4
+
+# Testar conectividade
+Test-NetConnection -ComputerName "8.8.8.8" -Port 53
+2. Renomear Servidor
+powershellRename-Computer -NewName "DC01" -RestartIfRequired
+3. Windows Update
+powershellInstall-PackageProvider -Name NuGet -Force
+Install-Module -Name PSWindowsUpdate -Force
+Get-WindowsUpdate
+Install-WindowsUpdate -AcceptAll -AutoReboot
+4. Instalação de Funções
+powershell# Instalar funções principais
+Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
+Install-WindowsFeature -Name DNS -IncludeManagementTools
+Install-WindowsFeature -Name DHCP -IncludeManagementTools
+Install-WindowsFeature -Name GPMC -IncludeManagementTools
+Install-WindowsFeature -Name RSAT-AD-Tools -IncludeAllSubFeature
+
+# Verificar instalação
+Get-WindowsFeature | Where-Object {$_.InstallState -eq "Installed"}
+Configurações de Segurança
+1. Políticas de Senha
+powershell# Configurações de segurança
+secedit /export /cfg c:\temp\secpol.cfg
+# Editar: Comprimento mínimo = 12, Complexidade = 1, Idade máxima = 90
+secedit /configure /db c:\temp\secedit.sdb /cfg c:\temp\secpol.cfg
+2. Auditoria
+powershell# Habilitar logs de auditoria
+auditpol /set /category:"Logon/Logoff" /success:enable /failure:enable
+auditpol /set /category:"Account Management" /success:enable /failure:enable
+
+# Aumentar tamanho dos logs
+wevtutil sl Security /ms:1024000000
+wevtutil sl System /ms:512000000
+3. Firewall
+powershell# Regras para Active Directory
+New-NetFirewallRule -DisplayName "Active Directory-LDAP" -Direction Inbound -Protocol TCP -LocalPort 389 -Action Allow
+New-NetFirewallRule -DisplayName "Active Directory-LDAPS" -Direction Inbound -Protocol TCP -LocalPort 636 -Action Allow
+New-NetFirewallRule -DisplayName "DNS" -Direction Inbound -Protocol TCP -LocalPort 53 -Action Allow
+New-NetFirewallRule -DisplayName "DNS-UDP" -Direction Inbound -Protocol UDP -LocalPort 53 -Action Allow
+New-NetFirewallRule -DisplayName "Kerberos" -Direction Inbound -Protocol TCP -LocalPort 88 -Action Allow
+New-NetFirewallRule -DisplayName "Kerberos-UDP" -Direction Inbound -Protocol UDP -LocalPort 88 -Action Allow
+4. Hardening Avançado
+powershell# Desabilitar serviços desnecessários
+$servicesToDisable = @("Fax", "Browser", "Telephony", "WebClient", "RemoteRegistry", "Themes", "TabletInputService")
+foreach ($service in $servicesToDisable) {
+    Set-Service -Name $service -StartupType Disabled -ErrorAction SilentlyContinue
+    Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+}
+
+# Configurações de registro de segurança
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "RestrictAnonymousSAM" -Value 1 -PropertyType DWORD -Force
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "RestrictAnonymous" -Value 1 -PropertyType DWORD -Force
+
+# Habilitar assinatura SMB
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters" -Name "RequireSecuritySignature" -Value 1 -PropertyType DWORD -Force
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters" -Name "RequireSecuritySignature" -Value 1 -PropertyType DWORD -Force
+Configuração de NTP
+powershell# Configurar servidor NTP
+w32tm /config /manualpeerlist:"pool.ntp.org,0x8" /syncfromflags:MANUAL
+w32tm /config /reliable:yes
+w32tm /config /update
+Restart-Service w32time
+
+# Verificar
+w32tm /query /status
+w32tm /query /peers
+Backup e Recuperação
+powershell# Habilitar pontos de restauração
+Enable-ComputerRestore -Drive "C:"
+Checkpoint-Computer -Description "Configuração Inicial Completa" -RestorePointType "MODIFY_SETTINGS"
+
+# Instalar Windows Server Backup
+Install-WindowsFeature -Name Windows-Server-Backup -IncludeManagementTools
+Scripts de Monitoramento
+Script de Monitoramento (Salvar em C:\Scripts\Monitor-Server.ps1)
+powershellWrite-Host "=== RELATÓRIO DE STATUS DO SERVIDOR ===" -ForegroundColor Yellow
+Write-Host "Data/Hora: $(Get-Date)" -ForegroundColor Cyan
+
+# Status dos serviços críticos
+$criticalServices = @("DNS", "DHCP", "Netlogon", "ADWS", "KDC", "W32Time")
+foreach ($service in $criticalServices) {
+    $svc = Get-Service -Name "*$service*" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($svc) {
+        $status = if ($svc.Status -eq "Running") { "✓" } else { "✗" }
+        Write-Host "$status $($svc.Name): $($svc.Status)" -ForegroundColor ($svc.Status -eq "Running" ? "Green" : "Red")
+    }
+}
+
+# Status do sistema
+$cpu = Get-WmiObject -Class win32_processor | Measure-Object -Property LoadPercentage -Average
+$memory = Get-WmiObject -Class win32_operatingsystem
+$disk = Get-WmiObject -Class win32_logicaldisk -Filter "DeviceID='C:'"
+
+Write-Host "CPU: $([math]::Round($cpu.Average, 2))%" -ForegroundColor Cyan
+Write-Host "Memória: $([math]::Round((($memory.TotalVisibleMemorySize - $memory.FreePhysicalMemory) / $memory.TotalVisibleMemorySize) * 100, 2))%" -ForegroundColor Cyan
+Write-Host "Disco C:: $([math]::Round((($disk.Size - $disk.FreeSpace) / $disk.Size) * 100, 2))%" -ForegroundColor Cyan
+Verificação Final
+Testes de Conectividade
+powershell# Testar conectividade externa
+Test-NetConnection -ComputerName "google.com" -Port 80
+
+# Testar resolução DNS
+Resolve-DnsName -Name "microsoft.com"
+
+# Verificar informações do sistema
+Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, WindowsBuildLabEx
+
+# Verificar configuração de rede
+Get-NetIPConfiguration
+Checklist de Instalação Completa
+✅ Instalação Base
+
+ Windows Server 2022 instalado com interface gráfica
+ Servidor renomeado para DC01
+ IP estático configurado (192.168.10.10)
+ DNS temporariamente configurado
+ Atualizações do Windows aplicadas
+
+✅ Funções e Recursos
+
+ Serviços de Domínio Active Directory instalados
+ Servidor DNS instalado
+ Servidor DHCP instalado
+ Ferramentas de administração instaladas
+
+✅ Segurança
+
+ Políticas de senha definidas
+ Firewall configurado com regras básicas
+ Auditoria habilitada
+ Serviços desnecessários desabilitados
+ Configurações de registro de segurança aplicadas
+
+✅ Monitoramento
+
+ Scripts de monitoramento criados
+ Ponto de restauração inicial criado
+ NTP configurado
+ Logs de sistema configurados
+
+Próximos Passos
+
+Promoção a Controlador de Domínio
+
+Configuração do Active Directory Domain Services
+Criação da floresta e domínio
+
+Configuração Avançada de DNS
+
+Zonas DNS internas
+Configuração de roteadores
+
+Configuração do DHCP
+
+Escopo de IPs
+Opções de DHCP (DNS, Gateway)
+
+Políticas de Grupo
+GPOs de segurança
+GPOs de configuração de usuários
+
+Backup e Recuperação
+Estratégia de backup do Active Directory
+Testes de recuperação
+
+Recursos de Suporte
+Microsoft Docs: https://docs.microsoft.com/windows-server/
+TechNet: https://technet.microsoft.com/
+PowerShell Gallery: https://www.powershellgallery.com/
